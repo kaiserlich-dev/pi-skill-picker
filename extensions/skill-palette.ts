@@ -48,13 +48,33 @@ interface PaletteState {
 }
 
 const MAX_RECENTS = 8;
+const USAGE_FILE = path.join(os.homedir(), ".pi-skill-picker", "usage.json");
 
 const state: PaletteState = {
 	queuedSkill: null,
 	recentSkills: [],
 };
 
-function recordUsage(skill: Skill, pi: ExtensionAPI) {
+function loadUsageFromDisk(): SkillUsage[] {
+	try {
+		const data = JSON.parse(fs.readFileSync(USAGE_FILE, "utf-8"));
+		return Array.isArray(data?.recents) ? data.recents : [];
+	} catch {
+		return [];
+	}
+}
+
+function saveUsageToDisk() {
+	try {
+		const dir = path.dirname(USAGE_FILE);
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(USAGE_FILE, JSON.stringify({ recents: state.recentSkills }, null, 2));
+	} catch {
+		// silently fail — not critical
+	}
+}
+
+function recordUsage(skill: Skill) {
 	// Find existing entry to preserve count
 	const existing = state.recentSkills.find(r => r.name === skill.name);
 	const count = (existing?.count ?? 0) + 1;
@@ -64,8 +84,8 @@ function recordUsage(skill: Skill, pi: ExtensionAPI) {
 	state.recentSkills.unshift({ name: skill.name, namespace: skill.namespace, timestamp: Date.now(), count });
 	if (state.recentSkills.length > MAX_RECENTS) state.recentSkills.length = MAX_RECENTS;
 
-	// Persist
-	pi.appendEntry("skill-picker-usage", { recents: state.recentSkills });
+	// Persist to disk
+	saveUsageToDisk();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -648,15 +668,8 @@ class SkillPaletteComponent implements Component, Focusable {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function skillPalette(pi: ExtensionAPI): void {
-	// Restore recent skills from session
-	pi.on("session_start", async (_event, ctx) => {
-		state.recentSkills = [];
-		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type === "custom" && (entry as any).customType === "skill-picker-usage") {
-				state.recentSkills = (entry as any).data?.recents ?? [];
-			}
-		}
-	});
+	// Load usage stats from disk on startup
+	state.recentSkills = loadUsageFromDisk();
 
 	// Custom renderer for skill-context messages
 	pi.registerMessageRenderer("skill-context", (message, options, theme) => {
@@ -714,7 +727,7 @@ export default function skillPalette(pi: ExtensionAPI): void {
 	// Shared: queue a skill + record usage
 	function queueSkill(skill: Skill, ctx: ExtensionContext) {
 		state.queuedSkill = skill;
-		recordUsage(skill, pi);
+		recordUsage(skill);
 		ctx.ui.setStatus("skill", `◆ ${skill.namespace}:${skill.name}`);
 		ctx.ui.setWidget("skill", [
 			`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${skill.namespace}:${skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
