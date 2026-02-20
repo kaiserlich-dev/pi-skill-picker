@@ -597,20 +597,53 @@ export default function skillPalette(pi: ExtensionAPI): void {
 		return items.length > 0 ? items.slice(0, 20) : null;
 	}
 
+	// Shared palette logic
+	async function openPalette(ctx: ExtensionContext) {
+		const skills = loadSkills();
+
+		if (skills.length === 0) {
+			ctx.ui.notify("No skills found", "warning");
+			return;
+		}
+
+		const result = await ctx.ui.custom<{ skill: Skill | null; action: "select" | "unqueue" | "cancel" }>(
+			(_tui, _theme, _kb, done) => new SkillPaletteComponent(
+				skills,
+				state.queuedSkill,
+				(skill, action) => done({ skill, action })
+			),
+			{ overlay: true, overlayOptions: { anchor: "center" as any, width: 78 } }
+		);
+
+		if (result.action === "select" && result.skill) {
+			state.queuedSkill = result.skill;
+			ctx.ui.setStatus("skill", `◆ ${result.skill.namespace}:${result.skill.name}`);
+			ctx.ui.setWidget("skill", [
+				`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${result.skill.namespace}:${result.skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
+			]);
+			ctx.ui.notify(`Skill queued: ${result.skill.namespace}:${result.skill.name}`, "info");
+		} else if (result.action === "unqueue") {
+			state.queuedSkill = null;
+			ctx.ui.setStatus("skill", undefined);
+			ctx.ui.setWidget("skill", undefined);
+			ctx.ui.notify("Skill unqueued", "info");
+		}
+	}
+
+	// Alt+K shortcut — instant palette
+	pi.registerShortcut("alt+k", {
+		description: "Open skill palette",
+		handler: (ctx) => openPalette(ctx as ExtensionContext),
+	});
+
 	// /skill command
 	pi.registerCommand("skill", {
-		description: "Open namespace-aware skill palette",
+		description: "Open namespace-aware skill palette (or Ctrl+K)",
 		getArgumentCompletions,
 		handler: async (args: string, ctx: ExtensionContext) => {
-			const skills = loadSkills();
-
-			if (skills.length === 0) {
-				ctx.ui.notify("No skills found", "warning");
-				return;
-			}
-
 			// If called with a direct argument like /skill marketing:ad-creative, skip palette
 			if (args.trim()) {
+				const skills = loadSkills();
 				const match = skills.find(s => `${s.namespace}:${s.name}` === args.trim() || s.name === args.trim());
 				if (match) {
 					state.queuedSkill = match;
@@ -623,29 +656,7 @@ export default function skillPalette(pi: ExtensionAPI): void {
 				}
 			}
 
-			// Show palette overlay
-			const result = await ctx.ui.custom<{ skill: Skill | null; action: "select" | "unqueue" | "cancel" }>(
-				(_tui, _theme, _kb, done) => new SkillPaletteComponent(
-					skills,
-					state.queuedSkill,
-					(skill, action) => done({ skill, action })
-				),
-				{ overlay: true, overlayOptions: { anchor: "center" as any, width: 78 } }
-			);
-
-			if (result.action === "select" && result.skill) {
-				state.queuedSkill = result.skill;
-				ctx.ui.setStatus("skill", `◆ ${result.skill.namespace}:${result.skill.name}`);
-				ctx.ui.setWidget("skill", [
-					`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${result.skill.namespace}:${result.skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
-				]);
-				ctx.ui.notify(`Skill queued: ${result.skill.namespace}:${result.skill.name}`, "info");
-			} else if (result.action === "unqueue") {
-				state.queuedSkill = null;
-				ctx.ui.setStatus("skill", undefined);
-				ctx.ui.setWidget("skill", undefined);
-				ctx.ui.notify("Skill unqueued", "info");
-			}
+			await openPalette(ctx);
 		},
 	});
 
