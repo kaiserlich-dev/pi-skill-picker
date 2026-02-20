@@ -39,6 +39,7 @@ interface SkillUsage {
 	name: string;
 	namespace: string;
 	timestamp: number;
+	count: number;
 }
 
 interface PaletteState {
@@ -54,9 +55,13 @@ const state: PaletteState = {
 };
 
 function recordUsage(skill: Skill, pi: ExtensionAPI) {
+	// Find existing entry to preserve count
+	const existing = state.recentSkills.find(r => r.name === skill.name);
+	const count = (existing?.count ?? 0) + 1;
+
 	// Remove existing entry for this skill, add to front
 	state.recentSkills = state.recentSkills.filter(r => r.name !== skill.name);
-	state.recentSkills.unshift({ name: skill.name, namespace: skill.namespace, timestamp: Date.now() });
+	state.recentSkills.unshift({ name: skill.name, namespace: skill.namespace, timestamp: Date.now(), count });
 	if (state.recentSkills.length > MAX_RECENTS) state.recentSkills.length = MAX_RECENTS;
 
 	// Persist
@@ -573,14 +578,21 @@ class SkillPaletteComponent implements Component, Focusable {
 				const nameStr = isSelected ? bold(cyan(skill.name)) : skill.name;
 				// In flat mode (searching), show namespace tag; in grouped mode, skip it
 				const nsTag = this.query.trim() ? dim(`${item.namespace} `) : "";
-				const usedWidth = visibleWidth(nsTag) + visibleWidth(skill.name) + 14;
+				// Show usage count for recent skills
+				const recentEntry = item.namespace === "recent"
+					? this.recents.find(r => r.name === skill.name)
+					: null;
+				const countTag = recentEntry && recentEntry.count > 1
+					? dim(` ×${recentEntry.count}`)
+					: "";
+				const usedWidth = visibleWidth(nsTag) + visibleWidth(skill.name) + visibleWidth(countTag) + 14;
 				const maxDescLen = Math.max(0, innerW - usedWidth);
 				const descStr = maxDescLen > 3
 					? dim(truncateToWidth(skill.description, maxDescLen, "…"))
 					: "";
 				const sep = descStr ? `  ${dim("—")}  ` : "";
 
-				lines.push(row(`  ${prefix} ${nsTag}${nameStr}${queuedBadge}${sep}${descStr}`));
+				lines.push(row(`  ${prefix} ${nsTag}${nameStr}${countTag}${queuedBadge}${sep}${descStr}`));
 			}
 
 			lines.push(emptyRow());
