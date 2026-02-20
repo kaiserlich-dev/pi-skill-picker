@@ -13,7 +13,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { matchesKey, truncateToWidth, visibleWidth, type Component, type Focusable } from "@mariozechner/pi-tui";
+import { matchesKey, truncateToWidth, visibleWidth, Text, type Component, type Focusable } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -27,6 +27,7 @@ interface Skill {
 	namespace: string;
 	description: string;
 	filePath: string;
+	source: "home" | "local";
 }
 
 interface DisplayItem {
@@ -45,6 +46,14 @@ interface SkillUsage {
 interface PaletteState {
 	queuedSkill: Skill | null;
 	recentSkills: SkillUsage[];
+}
+
+function escapeXml(s: string): string {
+	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function sanitize(s: string): string {
+	return s.replace(/[\x00-\x1f]/g, "");
 }
 
 const MAX_RECENTS = 8;
@@ -69,6 +78,7 @@ function saveUsageToDisk() {
 		const dir = path.dirname(USAGE_FILE);
 		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 		fs.writeFileSync(USAGE_FILE, JSON.stringify({ recents: state.recentSkills }, null, 2));
+		fs.chmodSync(USAGE_FILE, 0o600);
 	} catch {
 		// silently fail — not critical
 	}
@@ -158,11 +168,13 @@ function deriveNamespace(skillDir: string, symlinkSource?: string): string {
 interface SkillDirConfig {
 	dir: string;
 	recursive: boolean;
+	source: "home" | "local";
 }
 
 function scanSkillDir(
 	dir: string,
 	recursive: boolean,
+	source: "home" | "local",
 	skillsByName: Map<string, Skill>,
 	visited?: Set<string>
 ): void {
@@ -196,16 +208,16 @@ function scanSkillDir(
 				// Check for SKILL.md inside
 				const skillFile = path.join(entryPath, "SKILL.md");
 				if (fs.existsSync(skillFile)) {
-					loadSkillFile(skillFile, skillsByName, isSymlink ? entryPath : undefined);
+					loadSkillFile(skillFile, source, skillsByName, isSymlink ? entryPath : undefined);
 				} else if (recursive) {
-					scanSkillDir(entryPath, true, skillsByName, seen);
+					scanSkillDir(entryPath, true, source, skillsByName, seen);
 				}
 			}
 		}
 	} catch { /* skip inaccessible dirs */ }
 }
 
-function loadSkillFile(filePath: string, skillsByName: Map<string, Skill>, symlinkSource?: string): void {
+function loadSkillFile(filePath: string, source: "home" | "local", skillsByName: Map<string, Skill>, symlinkSource?: string): void {
 	try {
 		const content = fs.readFileSync(filePath, "utf-8");
 		const skillDir = path.dirname(filePath);
@@ -216,24 +228,26 @@ function loadSkillFile(filePath: string, skillsByName: Map<string, Skill>, symli
 
 		const namespace = deriveNamespace(skillDir, symlinkSource);
 
-		skillsByName.set(name, { name, namespace, description, filePath });
+		skillsByName.set(name, { name, namespace, description, filePath, source });
 	} catch { /* skip invalid */ }
 }
 
 function loadSkills(): Skill[] {
 	const skillsByName = new Map<string, Skill>();
 
+	// Home dirs first (trusted) — dedup means home skills can't be shadowed by repo-local ones
 	const dirs: SkillDirConfig[] = [
-		{ dir: path.join(os.homedir(), ".codex", "skills"), recursive: true },
-		{ dir: path.join(os.homedir(), ".claude", "skills"), recursive: false },
-		{ dir: path.join(process.cwd(), ".claude", "skills"), recursive: false },
-		{ dir: path.join(os.homedir(), ".pi", "agent", "skills"), recursive: true },
-		{ dir: path.join(os.homedir(), ".pi", "skills"), recursive: true },
-		{ dir: path.join(process.cwd(), ".pi", "skills"), recursive: true },
+		{ dir: path.join(os.homedir(), ".codex", "skills"), recursive: true, source: "home" },
+		{ dir: path.join(os.homedir(), ".claude", "skills"), recursive: false, source: "home" },
+		{ dir: path.join(os.homedir(), ".pi", "agent", "skills"), recursive: true, source: "home" },
+		{ dir: path.join(os.homedir(), ".pi", "skills"), recursive: true, source: "home" },
+		// CWD dirs last — repo-local skills can't override home skills
+		{ dir: path.join(process.cwd(), ".claude", "skills"), recursive: false, source: "local" },
+		{ dir: path.join(process.cwd(), ".pi", "skills"), recursive: true, source: "local" },
 	];
 
-	for (const { dir, recursive } of dirs) {
-		scanSkillDir(dir, recursive, skillsByName);
+	for (const { dir, recursive, source } of dirs) {
+		scanSkillDir(dir, recursive, source, skillsByName);
 	}
 
 	return Array.from(skillsByName.values());
@@ -374,10 +388,11 @@ function buildDisplayList(skills: Skill[], recents: SkillUsage[]): DisplayItem[]
 		}
 	}
 
-	// Group remaining by namespace
+	// Group remaining by namespace, excluding skills already shown in recents
 	const recentNames = new Set(recents.map(r => r.name));
 	const groups = new Map<string, Skill[]>();
 	for (const skill of skills) {
+		if (recentNames.has(skill.name)) continue;
 		const list = groups.get(skill.namespace) || [];
 		list.push(skill);
 		groups.set(skill.namespace, list);
@@ -595,6 +610,7 @@ class SkillPaletteComponent implements Component, Focusable {
 
 				const prefix = isSelected ? cyan("▸") : dim("·");
 				const queuedBadge = isQueued ? ` ${green("●")}` : "";
+				const localBadge = skill.source === "local" ? ` ${dim("[local]")}` : "";
 				const nameStr = isSelected ? bold(cyan(skill.name)) : skill.name;
 				// In flat mode (searching), show namespace tag; in grouped mode, skip it
 				const nsTag = this.query.trim() ? dim(`${item.namespace} `) : "";
@@ -605,14 +621,14 @@ class SkillPaletteComponent implements Component, Focusable {
 				const countTag = recentEntry && recentEntry.count > 1
 					? dim(` ×${recentEntry.count}`)
 					: "";
-				const usedWidth = visibleWidth(nsTag) + visibleWidth(skill.name) + visibleWidth(countTag) + 14;
+				const usedWidth = visibleWidth(nsTag) + visibleWidth(skill.name) + visibleWidth(countTag) + visibleWidth(localBadge) + 14;
 				const maxDescLen = Math.max(0, innerW - usedWidth);
 				const descStr = maxDescLen > 3
 					? dim(truncateToWidth(skill.description, maxDescLen, "…"))
 					: "";
 				const sep = descStr ? `  ${dim("—")}  ` : "";
 
-				lines.push(row(`  ${prefix} ${nsTag}${nameStr}${countTag}${queuedBadge}${sep}${descStr}`));
+				lines.push(row(`  ${prefix} ${nsTag}${nameStr}${countTag}${localBadge}${queuedBadge}${sep}${descStr}`));
 			}
 
 			lines.push(emptyRow());
@@ -682,7 +698,6 @@ export default function skillPalette(pi: ExtensionAPI): void {
 		const nameMatch = rawContent.match(/<skill name="([^"]+)">/);
 		const skillName = nameMatch?.[1] || "Unknown Skill";
 
-		const { Text } = require("@mariozechner/pi-tui");
 		const header = theme.fg("accent", "◆ ") +
 			theme.fg("customMessageLabel", theme.bold("Skill: ")) +
 			theme.fg("accent", skillName);
@@ -724,15 +739,15 @@ export default function skillPalette(pi: ExtensionAPI): void {
 		return items.length > 0 ? items.slice(0, 20) : null;
 	}
 
-	// Shared: queue a skill + record usage
+	// Shared: queue a skill (usage recorded on actual injection)
 	function queueSkill(skill: Skill, ctx: ExtensionContext) {
 		state.queuedSkill = skill;
-		recordUsage(skill);
-		ctx.ui.setStatus("skill", `◆ ${skill.namespace}:${skill.name}`);
+		const safeName = sanitize(`${skill.namespace}:${skill.name}`);
+		ctx.ui.setStatus("skill", `◆ ${safeName}`);
 		ctx.ui.setWidget("skill", [
-			`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${skill.namespace}:${skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
+			`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${safeName}\x1b[0m\x1b[2m — next message\x1b[0m`
 		]);
-		ctx.ui.notify(`Skill queued: ${skill.namespace}:${skill.name}`, "info");
+		ctx.ui.notify(`Skill queued: ${safeName}`, "info");
 	}
 
 	// Shared palette logic
@@ -772,7 +787,7 @@ export default function skillPalette(pi: ExtensionAPI): void {
 
 	// /skill command
 	pi.registerCommand("skill", {
-		description: "Open namespace-aware skill palette (or Ctrl+K)",
+		description: "Open namespace-aware skill palette (or Alt+K)",
 		getArgumentCompletions,
 		handler: async (args: string, ctx: ExtensionContext) => {
 			// If called with a direct argument like /skill marketing:ad-creative, skip palette
@@ -799,12 +814,15 @@ export default function skillPalette(pi: ExtensionAPI): void {
 		_ctx.ui?.setStatus("skill", undefined);
 		_ctx.ui?.setWidget("skill", undefined);
 
+		// Record usage only when skill is actually injected
+		recordUsage(skill);
+
 		try {
 			const content = getSkillContent(skill);
 			return {
 				message: {
 					customType: "skill-context",
-					content: `<skill name="${skill.namespace}:${skill.name}">\n${content}\n</skill>`,
+					content: `<skill name="${escapeXml(skill.namespace)}:${escapeXml(skill.name)}">\n${content}\n</skill>`,
 					display: true,
 				},
 			};
