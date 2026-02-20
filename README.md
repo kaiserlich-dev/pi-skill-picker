@@ -1,4 +1,4 @@
-# pi-skill-palette
+# pi-skill-picker
 
 Namespace-aware skill palette for [pi](https://github.com/badlogic/pi). Groups skills by category folder (marketing, infra, comms, etc.) for faster discovery.
 
@@ -51,7 +51,7 @@ Skip the palette with direct arguments:
 
 ```bash
 # From repo
-pi install git:github.com/kaiserlich-dev/pi-skill-palette
+pi install git:github.com/kaiserlich-dev/pi-skill-picker
 
 # Or link locally for development
 pi -e ./extensions/skill-palette.ts
