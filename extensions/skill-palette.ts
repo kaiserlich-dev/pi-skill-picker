@@ -198,23 +198,56 @@ function loadSkills(): Skill[] {
 // Fuzzy Matching
 // ═══════════════════════════════════════════════════════════════════════════
 
-function fuzzyScore(query: string, text: string): number {
+/**
+ * Score how well a query matches text.
+ *
+ * Tiers (highest wins):
+ *   1. Exact match (text === query)           → 10000
+ *   2. Starts with query                      → 5000 + length bonus
+ *   3. Contains query as substring            → 1000 + length bonus
+ *   4. All query chars found in order,
+ *      with enough consecutive runs           → 1-500
+ *   5. No match                               → 0
+ */
+function scoreMatch(query: string, text: string): number {
 	const lq = query.toLowerCase();
 	const lt = text.toLowerCase();
 
-	if (lt.includes(lq)) return 100 + (lq.length / lt.length) * 50;
+	// Exact
+	if (lt === lq) return 10000;
 
-	let score = 0, qi = 0, consecutive = 0;
+	// Starts with
+	if (lt.startsWith(lq)) return 5000 + (lq.length / lt.length) * 100;
+
+	// Contains substring
+	const subIdx = lt.indexOf(lq);
+	if (subIdx >= 0) {
+		// Bonus for matching at word boundary (after - or space)
+		const atBoundary = subIdx === 0 || lt[subIdx - 1] === "-" || lt[subIdx - 1] === " ";
+		return 1000 + (lq.length / lt.length) * 100 + (atBoundary ? 200 : 0);
+	}
+
+	// Fuzzy: all chars in order, but require decent consecutive runs
+	let qi = 0, maxRun = 0, currentRun = 0, totalMatched = 0;
 	for (let i = 0; i < lt.length && qi < lq.length; i++) {
 		if (lt[i] === lq[qi]) {
-			score += 10 + consecutive;
-			consecutive += 5;
+			currentRun++;
+			totalMatched++;
+			maxRun = Math.max(maxRun, currentRun);
 			qi++;
 		} else {
-			consecutive = 0;
+			currentRun = 0;
 		}
 	}
-	return qi === lq.length ? score : 0;
+
+	if (qi < lq.length) return 0; // Not all chars matched
+
+	// Require at least 60% of query in one consecutive run, or query length >= 3
+	// This kills random 2-char scattered matches
+	if (lq.length <= 2 && maxRun < lq.length) return 0;
+	if (maxRun < Math.ceil(lq.length * 0.4)) return 0;
+
+	return 100 + maxRun * 30 + (totalMatched / lt.length) * 50;
 }
 
 function filterSkills(skills: Skill[], query: string): Skill[] {
@@ -229,13 +262,12 @@ function filterSkills(skills: Skill[], query: string): Skill[] {
 		const nameQuery = query.slice(colonIdx + 1).trim();
 		const nsSkills = skills.filter(s => s.namespace.toLowerCase().startsWith(nsFilter));
 		if (!nameQuery) return nsSkills;
-		// Further filter within namespace
 		const scored = nsSkills
 			.map(skill => ({
 				skill,
 				score: Math.max(
-					fuzzyScore(nameQuery, skill.name),
-					fuzzyScore(nameQuery, skill.description) * 0.7,
+					scoreMatch(nameQuery, skill.name),
+					scoreMatch(nameQuery, skill.description) * 0.3,
 				),
 			}))
 			.filter(item => item.score > 0)
@@ -253,16 +285,22 @@ function filterSkills(skills: Skill[], query: string): Skill[] {
 		return skills.filter(s => s.namespace.toLowerCase() === nsMatches[0]);
 	}
 
-	// General fuzzy match on skill name and description
+	// Score each skill: name match heavily preferred over description
 	const scored = skills
-		.map(skill => ({
-			skill,
-			score: Math.max(
-				fuzzyScore(lowerQuery, skill.name),
-				fuzzyScore(lowerQuery, skill.description) * 0.7,
-				fuzzyScore(lowerQuery, `${skill.namespace}:${skill.name}`) * 0.9,
-			),
-		}))
+		.map(skill => {
+			const nameScore = scoreMatch(lowerQuery, skill.name);
+			const nsNameScore = scoreMatch(lowerQuery, `${skill.namespace}:${skill.name}`) * 0.9;
+			// Description: substring only, no fuzzy — avoids garbage matches
+			const descLower = skill.description.toLowerCase();
+			const descScore = descLower.includes(lowerQuery)
+				? 500 + (lowerQuery.length / descLower.length) * 100
+				: 0;
+
+			return {
+				skill,
+				score: Math.max(nameScore, nsNameScore, descScore),
+			};
+		})
 		.filter(item => item.score > 0)
 		.sort((a, b) => b.score - a.score);
 
@@ -357,7 +395,17 @@ class SkillPaletteComponent implements Component, Focusable {
 
 	private updateFilter() {
 		const filtered = filterSkills(this.allSkills, this.query);
-		this.displayItems = buildDisplayList(filtered);
+		// When searching: flat list sorted by score (no namespace grouping)
+		// When browsing: grouped by namespace
+		if (this.query.trim()) {
+			this.displayItems = filtered.map(skill => ({
+				type: "skill" as const,
+				skill,
+				namespace: skill.namespace,
+			}));
+		} else {
+			this.displayItems = buildDisplayList(filtered);
+		}
 		const first = this.firstSkillIndex();
 		this.selectedIndex = first >= 0 ? first : 0;
 	}
@@ -482,13 +530,16 @@ class SkillPaletteComponent implements Component, Focusable {
 				const prefix = isSelected ? cyan("▸") : dim("·");
 				const queuedBadge = isQueued ? ` ${green("●")}` : "";
 				const nameStr = isSelected ? bold(cyan(skill.name)) : skill.name;
-				const maxDescLen = Math.max(0, innerW - visibleWidth(skill.name) - 14);
+				// In flat mode (searching), show namespace tag; in grouped mode, skip it
+				const nsTag = this.query.trim() ? dim(`${item.namespace} `) : "";
+				const usedWidth = visibleWidth(nsTag) + visibleWidth(skill.name) + 14;
+				const maxDescLen = Math.max(0, innerW - usedWidth);
 				const descStr = maxDescLen > 3
 					? dim(truncateToWidth(skill.description, maxDescLen, "…"))
 					: "";
 				const sep = descStr ? `  ${dim("—")}  ` : "";
 
-				lines.push(row(`  ${prefix} ${nameStr}${queuedBadge}${sep}${descStr}`));
+				lines.push(row(`  ${prefix} ${nsTag}${nameStr}${queuedBadge}${sep}${descStr}`));
 			}
 
 			lines.push(emptyRow());
