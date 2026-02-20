@@ -35,13 +35,33 @@ interface DisplayItem {
 	skill?: Skill;
 }
 
+interface SkillUsage {
+	name: string;
+	namespace: string;
+	timestamp: number;
+}
+
 interface PaletteState {
 	queuedSkill: Skill | null;
+	recentSkills: SkillUsage[];
 }
+
+const MAX_RECENTS = 8;
 
 const state: PaletteState = {
 	queuedSkill: null,
+	recentSkills: [],
 };
+
+function recordUsage(skill: Skill, pi: ExtensionAPI) {
+	// Remove existing entry for this skill, add to front
+	state.recentSkills = state.recentSkills.filter(r => r.name !== skill.name);
+	state.recentSkills.unshift({ name: skill.name, namespace: skill.namespace, timestamp: Date.now() });
+	if (state.recentSkills.length > MAX_RECENTS) state.recentSkills.length = MAX_RECENTS;
+
+	// Persist
+	pi.appendEntry("skill-picker-usage", { recents: state.recentSkills });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Skill Loading
@@ -311,8 +331,26 @@ function filterSkills(skills: Skill[], query: string): Skill[] {
 // Build display list (skills grouped by namespace with headers)
 // ═══════════════════════════════════════════════════════════════════════════
 
-function buildDisplayList(skills: Skill[]): DisplayItem[] {
-	// Group by namespace
+function buildDisplayList(skills: Skill[], recents: SkillUsage[]): DisplayItem[] {
+	const items: DisplayItem[] = [];
+
+	// Add recent section if we have any
+	if (recents.length > 0) {
+		const recentNames = new Set(recents.map(r => r.name));
+		const recentSkills = recents
+			.map(r => skills.find(s => s.name === r.name))
+			.filter((s): s is Skill => s != null);
+
+		if (recentSkills.length > 0) {
+			items.push({ type: "header", namespace: "recent" });
+			for (const skill of recentSkills) {
+				items.push({ type: "skill", skill, namespace: "recent" });
+			}
+		}
+	}
+
+	// Group remaining by namespace
+	const recentNames = new Set(recents.map(r => r.name));
 	const groups = new Map<string, Skill[]>();
 	for (const skill of skills) {
 		const list = groups.get(skill.namespace) || [];
@@ -327,7 +365,6 @@ function buildDisplayList(skills: Skill[]): DisplayItem[] {
 		return a.localeCompare(b);
 	});
 
-	const items: DisplayItem[] = [];
 	for (const ns of sortedNs) {
 		items.push({ type: "header", namespace: ns });
 		const sorted = groups.get(ns)!.sort((a, b) => a.name.localeCompare(b.name));
@@ -359,11 +396,12 @@ class SkillPaletteComponent implements Component, Focusable {
 	constructor(
 		skills: Skill[],
 		queuedSkill: Skill | null,
+		private recents: SkillUsage[],
 		private done: (skill: Skill | null, action: "select" | "unqueue" | "cancel") => void
 	) {
 		this.allSkills = skills;
 		this.queuedSkillName = queuedSkill?.name ?? null;
-		this.displayItems = buildDisplayList(skills);
+		this.displayItems = buildDisplayList(skills, recents);
 		this.selectedIndex = this.firstSkillIndex();
 		this.resetInactivity();
 	}
@@ -396,7 +434,7 @@ class SkillPaletteComponent implements Component, Focusable {
 	private updateFilter() {
 		const filtered = filterSkills(this.allSkills, this.query);
 		// When searching: flat list sorted by score (no namespace grouping)
-		// When browsing: grouped by namespace
+		// When browsing: grouped by namespace with recents at top
 		if (this.query.trim()) {
 			this.displayItems = filtered.map(skill => ({
 				type: "skill" as const,
@@ -404,7 +442,7 @@ class SkillPaletteComponent implements Component, Focusable {
 				namespace: skill.namespace,
 			}));
 		} else {
-			this.displayItems = buildDisplayList(filtered);
+			this.displayItems = buildDisplayList(filtered, this.recents);
 		}
 		const first = this.firstSkillIndex();
 		this.selectedIndex = first >= 0 ? first : 0;
@@ -518,7 +556,10 @@ class SkillPaletteComponent implements Component, Focusable {
 				const item = skillItems[i];
 
 				if (item.type === "header") {
-					const nsLabel = bold(yellow(item.namespace!));
+					const isRecent = item.namespace === "recent";
+					const nsLabel = isRecent
+						? bold(green("★ recent"))
+						: bold(yellow(item.namespace!));
 					lines.push(row(`${nsLabel}`));
 					continue;
 				}
@@ -595,6 +636,16 @@ class SkillPaletteComponent implements Component, Focusable {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function skillPalette(pi: ExtensionAPI): void {
+	// Restore recent skills from session
+	pi.on("session_start", async (_event, ctx) => {
+		state.recentSkills = [];
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type === "custom" && (entry as any).customType === "skill-picker-usage") {
+				state.recentSkills = (entry as any).data?.recents ?? [];
+			}
+		}
+	});
+
 	// Custom renderer for skill-context messages
 	pi.registerMessageRenderer("skill-context", (message, options, theme) => {
 		const rawContent = typeof message.content === "string"
@@ -648,6 +699,17 @@ export default function skillPalette(pi: ExtensionAPI): void {
 		return items.length > 0 ? items.slice(0, 20) : null;
 	}
 
+	// Shared: queue a skill + record usage
+	function queueSkill(skill: Skill, ctx: ExtensionContext) {
+		state.queuedSkill = skill;
+		recordUsage(skill, pi);
+		ctx.ui.setStatus("skill", `◆ ${skill.namespace}:${skill.name}`);
+		ctx.ui.setWidget("skill", [
+			`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${skill.namespace}:${skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
+		]);
+		ctx.ui.notify(`Skill queued: ${skill.namespace}:${skill.name}`, "info");
+	}
+
 	// Shared palette logic
 	async function openPalette(ctx: ExtensionContext) {
 		const skills = loadSkills();
@@ -661,18 +723,14 @@ export default function skillPalette(pi: ExtensionAPI): void {
 			(_tui, _theme, _kb, done) => new SkillPaletteComponent(
 				skills,
 				state.queuedSkill,
+				state.recentSkills,
 				(skill, action) => done({ skill, action })
 			),
 			{ overlay: true, overlayOptions: { anchor: "center" as any, width: 78 } }
 		);
 
 		if (result.action === "select" && result.skill) {
-			state.queuedSkill = result.skill;
-			ctx.ui.setStatus("skill", `◆ ${result.skill.namespace}:${result.skill.name}`);
-			ctx.ui.setWidget("skill", [
-				`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${result.skill.namespace}:${result.skill.name}\x1b[0m\x1b[2m — next message\x1b[0m`
-			]);
-			ctx.ui.notify(`Skill queued: ${result.skill.namespace}:${result.skill.name}`, "info");
+			queueSkill(result.skill, ctx);
 		} else if (result.action === "unqueue") {
 			state.queuedSkill = null;
 			ctx.ui.setStatus("skill", undefined);
@@ -697,12 +755,7 @@ export default function skillPalette(pi: ExtensionAPI): void {
 				const skills = loadSkills();
 				const match = skills.find(s => `${s.namespace}:${s.name}` === args.trim() || s.name === args.trim());
 				if (match) {
-					state.queuedSkill = match;
-					ctx.ui.setStatus("skill", `◆ ${match.namespace}:${match.name}`);
-					ctx.ui.setWidget("skill", [
-						`\x1b[2m◆ Skill: \x1b[0m\x1b[36m${match.namespace}:${match.name}\x1b[0m\x1b[2m — next message\x1b[0m`
-					]);
-					ctx.ui.notify(`Skill queued: ${match.namespace}:${match.name}`, "info");
+					queueSkill(match, ctx);
 					return;
 				}
 			}
