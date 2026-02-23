@@ -1,6 +1,6 @@
 {
-  "name": "pi-skill-picker",
-  "version": "0.1.0",
+  "name": "@kaiserlich-dev/pi-skill-picker",
+  "version": "1.0.0",
   "description": "Namespace-aware skill palette for pi — groups skills by category folder",
   "keywords": [
     "pi-package"
@@ -10,6 +10,15 @@
     "type": "git",
     "url": "https://github.com/kaiserlich-dev/pi-skill-picker"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "extensions",
+    "!extensions/__tests__",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "./extensions/skill-palette.ts"
@@ -18,6 +27,9 @@
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-tui": "*"
+  },
+  "scripts": {
+    "publish:pi": "bash ./scripts/publish.sh"
   },
   "devDependencies": {
     "tsx": "^4.21.0",
