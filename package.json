@@ -1,9 +1,13 @@
 {
   "name": "@kaiserlich-dev/pi-skill-picker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Namespace-aware skill palette for pi — groups skills by category folder",
   "keywords": [
-    "pi-package"
+    "pi-package",
+    "pi-coding-agent",
+    "skills",
+    "palette",
+    "fuzzy-search"
   ],
   "license": "MIT",
   "repository": {
