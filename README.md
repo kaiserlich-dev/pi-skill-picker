@@ -1,12 +1,24 @@
-# pi-skill-picker
+# @kaiserlich-dev/pi-skill-picker
 
-Namespace-aware skill palette for [pi](https://github.com/badlogic/pi). Groups skills by category folder (marketing, infra, comms, etc.) for faster discovery.
+Namespace-aware skill palette for [pi](https://github.com/mariozechner/pi). Groups skills by category folder (marketing, infra, comms, etc.) for faster discovery.
 
 ## Install
+
+### npm (recommended)
+
+```bash
+pi install npm:@kaiserlich-dev/pi-skill-picker
+```
+
+### git (alternative)
 
 ```bash
 pi install git:github.com/kaiserlich-dev/pi-skill-picker
 ```
+
+> By default this writes to `~/.pi/agent/settings.json`. Use `-l` to install into `.pi/settings.json` for a project.
+
+Then restart pi or run `/reload`.
 
 ## Usage
 
@@ -69,6 +81,6 @@ Selected skills are queued and injected alongside your next message via `before_
 ## Development
 
 ```bash
-# Link locally
+# Run locally without installing
 pi -e ./extensions/skill-palette.ts
 ```
